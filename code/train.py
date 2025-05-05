@@ -3,7 +3,8 @@ import random
 import torch
 from torch.utils.data import DataLoader, Dataset
 import torchvision
-from torchvision.models.detection import maskrcnn_resnet50_fpn
+from torchvision.models.detection import MaskRCNN
+from torchvision.models.detection.backbone_utils import BackboneWithFPN
 from torchvision.transforms import v2
 import numpy as np
 from tqdm import tqdm
@@ -14,13 +15,14 @@ import scipy.ndimage
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from pycocotools import mask as maskUtils
-os.environ["CUDA_VISIBLE_DEVICES"] = '1'
+os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 BATCH_SIZE = 2
-EPOCHS = 100
+EPOCHS = 60
 PATIENCE = 20
 LEARNING_RATE = 1e-4
-NAMING = "MaskRCNN_b2"
+NAMING = "conv_b2"
+DETECTIONS_PER_IMG = 350
 
 train_transform = v2.Compose([
     v2.ToImage(),
@@ -60,8 +62,6 @@ class SegmentationDataset(Dataset):
                 labeled_mask, num_features = scipy.ndimage.label(mask)
                 for j in range(1, num_features + 1):
                     component_mask = (labeled_mask == j)
-                    if component_mask.shape != (img.height, img.width):
-                        raise ValueError(f"遮罩尺寸 {component_mask.shape} 與圖像尺寸 {(img.height, img.width)} 不匹配")
                     masks.append(torch.as_tensor(component_mask, dtype=torch.uint8))
                     labels.append(i)
 
@@ -109,19 +109,71 @@ class SegmentationDataset(Dataset):
     def __len__(self):
         return len(self.folders)
 
+class ConvNeXtBackbone(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        convnext = torchvision.models.convnext.convnext_base(weights='DEFAULT')
+        self.feature0 = convnext.features[0]
+        self.feature1 = convnext.features[1]
+        self.feature2 = convnext.features[2]
+        self.feature3 = convnext.features[3]
+        self.feature4 = convnext.features[4]
+        self.feature5 = convnext.features[5]
+        self.feature6 = convnext.features[6]
+        self.feature7 = convnext.features[7]
+
+    def forward(self, x):
+        out0 = self.feature0(x)
+        out1 = self.feature1(out0)
+        out2 = self.feature2(out1)
+        out3 = self.feature3(out2)
+        out4 = self.feature4(out3)
+        out5 = self.feature5(out4)
+        out6 = self.feature6(out5)
+        out7 = self.feature7(out6)
+        return {
+            'feature1': out1,
+            'feature3': out3,
+            'feature5': out5,
+            'feature7': out7
+        }
+
 class MaskRCNNModel(torch.nn.Module):
     def __init__(self, num_classes=5, pretrained=True):
         super(MaskRCNNModel, self).__init__()
-        self.model = maskrcnn_resnet50_fpn(weights="DEFAULT" if pretrained else None)
-
+        backbone = ConvNeXtBackbone()
+        returned_layers = {
+            'feature1': '0',
+            'feature3': '1',
+            'feature5': '2',
+            'feature7': '3'
+        }
+        backbone_with_fpn = BackboneWithFPN(
+            backbone,
+            return_layers=returned_layers,
+            in_channels_list=[128, 256, 512, 1024],
+            out_channels=256
+        )
+        
+        # Initialize Mask R-CNN with the custom backbone
+        self.model = MaskRCNN(
+            backbone_with_fpn,
+            num_classes=num_classes
+        )
+        
+        # Replace the classification head
         in_features = self.model.roi_heads.box_predictor.cls_score.in_features
         self.model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(
-            in_features, num_classes)
-
+            in_features, num_classes
+        )
+        
+        # Replace the mask head
         in_features_mask = self.model.roi_heads.mask_predictor.conv5_mask.in_channels
         hidden_layer = 256
         self.model.roi_heads.mask_predictor = torchvision.models.detection.mask_rcnn.MaskRCNNPredictor(
-            in_features_mask, hidden_layer, num_classes)
+            in_features_mask, hidden_layer, num_classes
+        )
+        self.model.roi_heads.detections_per_img = DETECTIONS_PER_IMG
 
     def forward(self, images, targets=None):
         if targets is not None:
@@ -253,13 +305,13 @@ def validate(model, data_loader, device):
 
     coco_dt_coco = coco.loadRes(coco_dt)
     coco_eval = COCOeval(coco, coco_dt_coco, 'segm')
-    coco_eval.params.iouThrs = np.array([0.5])  # 僅計算 IoU=0.5 的 mAP
+    # coco_eval.params.iouThrs = np.array([0.5])  # 僅計算 IoU=0.5 的 mAP
     coco_eval.evaluate()
     coco_eval.accumulate()
     coco_eval.summarize()
 
     mAP = coco_eval.stats[0] if coco_eval.stats[0] >= 0 else 0.0
-    return mAP
+    return float(mAP)
 
 def main(seed=77):
     set_seed(seed)
