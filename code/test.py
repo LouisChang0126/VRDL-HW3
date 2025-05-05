@@ -5,17 +5,24 @@ from torch.utils.data import DataLoader, Dataset
 import torchvision
 from torchvision.models.detection import MaskRCNN
 from torchvision.models.detection.backbone_utils import BackboneWithFPN
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from torchvision.transforms import v2
 from PIL import Image
 import numpy as np
 from tqdm import tqdm
 from pycocotools import mask as mask_utils
 import zipfile
-import matplotlib.pyplot as plt
 os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 MODEL_PATH = "conv_b2_seed77.pth"
 DETECTIONS_PER_IMG = 350
+
+test_transform = v2.Compose([
+    v2.ToImage(),
+    v2.ConvertImageDtype(torch.float)
+])
+
 
 class SegmentationDatasetTest(Dataset):
     def __init__(self, image_files, image_id_mapping, transforms=None):
@@ -38,10 +45,6 @@ class SegmentationDatasetTest(Dataset):
     def __len__(self):
         return len(self.image_files)
 
-test_transform = v2.Compose([
-    v2.ToImage(),
-    v2.ConvertImageDtype(torch.float)
-])
 
 class ConvNeXtBackbone(torch.nn.Module):
     def __init__(self):
@@ -72,6 +75,7 @@ class ConvNeXtBackbone(torch.nn.Module):
             'feature7': out7
         }
 
+
 class MaskRCNNModel(torch.nn.Module):
     def __init__(self, num_classes=5, pretrained=True):
         super(MaskRCNNModel, self).__init__()
@@ -88,23 +92,24 @@ class MaskRCNNModel(torch.nn.Module):
             in_channels_list=[128, 256, 512, 1024],
             out_channels=256
         )
-        
+
         # Initialize Mask R-CNN with the custom backbone
         self.model = MaskRCNN(
             backbone_with_fpn,
             num_classes=num_classes
         )
-        
+
         # Replace the classification head
         in_features = self.model.roi_heads.box_predictor.cls_score.in_features
-        self.model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(
+        self.model.roi_heads.box_predictor = FastRCNNPredictor(
             in_features, num_classes
         )
-        
+
         # Replace the mask head
-        in_features_mask = self.model.roi_heads.mask_predictor.conv5_mask.in_channels
+        in_features_mask = self.model.roi_heads\
+            .mask_predictor.conv5_mask.in_channels
         hidden_layer = 256
-        self.model.roi_heads.mask_predictor = torchvision.models.detection.mask_rcnn.MaskRCNNPredictor(
+        self.model.roi_heads.mask_predictor = MaskRCNNPredictor(
             in_features_mask, hidden_layer, num_classes
         )
         self.model.roi_heads.detections_per_img = DETECTIONS_PER_IMG
@@ -115,14 +120,17 @@ class MaskRCNNModel(torch.nn.Module):
         else:
             return self.model(images)
 
+
 def encode_mask(binary_mask):
     binary_mask = np.asfortranarray(binary_mask.astype(np.uint8))
     rle = mask_utils.encode(binary_mask)
     rle['counts'] = rle['counts'].decode('utf-8')
     return rle
 
+
 def collate_fn(batch):
     return tuple(zip(*batch))
+
 
 def zip_file():
     zip_filename = MODEL_PATH.replace('.pth', '.zip')
@@ -133,19 +141,26 @@ def zip_file():
             zipf.write(file)
 
     print(f"finish zipping {zip_filename}")
-    
+
+
 def test():
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    device = torch.device('cuda')
 
     with open("data/test_image_name_to_ids.json", 'r') as f:
         image_id_list = json.load(f)
-    image_id_mapping = {item['file_name']: item['id'] for item in image_id_list}
+    image_id_mapping = {item['file_name']: item['id']
+                        for item in image_id_list}
 
     data_root = "data/test_release"
-    image_files = [os.path.join(data_root, fname) for fname in os.listdir(data_root) if fname.endswith('.tif')]
+    image_files = [os.path.join(data_root, fname)
+                   for fname in os.listdir(data_root)
+                   if fname.endswith('.tif')]
 
-    test_dataset = SegmentationDatasetTest(image_files, image_id_mapping, transforms=test_transform)
-    test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, collate_fn=collate_fn)
+    test_dataset = SegmentationDatasetTest(image_files,
+                                           image_id_mapping,
+                                           transforms=test_transform)
+    test_loader = DataLoader(test_dataset, batch_size=8,
+                             shuffle=False, collate_fn=collate_fn)
 
     model = MaskRCNNModel(num_classes=5).to(device)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
@@ -164,7 +179,8 @@ def test():
                 labels = output['labels'].cpu().numpy()
                 masks = output['masks'].squeeze(1).cpu().numpy()  # (N, H, W)
 
-                for box, score, label, mask in zip(boxes, scores, labels, masks):
+                for box, score, label, mask in zip(boxes,
+                                                   scores, labels, masks):
                     xmin, ymin, xmax, ymax = box
                     width = xmax - xmin
                     height = ymax - ymin
@@ -175,7 +191,8 @@ def test():
                     result = {
                         "image_id": int(image_id),
                         "category_id": int(label),
-                        "bbox": [float(xmin), float(ymin), float(width), float(height)],
+                        "bbox": [float(xmin), float(ymin),
+                                 float(width), float(height)],
                         "score": float(score),
                         "segmentation": rle_mask
                     }
@@ -183,8 +200,8 @@ def test():
 
     with open("test-results.json", 'w') as f:
         json.dump(results, f)
+    print("Saved results to test-results.json")
 
-    print(f"Saved results to test-results.json")
 
 if __name__ == "__main__":
     test()

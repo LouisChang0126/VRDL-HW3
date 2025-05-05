@@ -5,6 +5,8 @@ from torch.utils.data import DataLoader, Dataset
 import torchvision
 from torchvision.models.detection import MaskRCNN
 from torchvision.models.detection.backbone_utils import BackboneWithFPN
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from torchvision.transforms import v2
 import numpy as np
 from tqdm import tqdm
@@ -33,6 +35,7 @@ valid_transform = v2.Compose([
     v2.ConvertImageDtype(torch.float)
 ])
 
+
 def set_seed(seed=77):
     random.seed(seed)
     np.random.seed(seed)
@@ -41,6 +44,7 @@ def set_seed(seed=77):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
 
 class SegmentationDataset(Dataset):
     def __init__(self, folders, transforms=None):
@@ -62,7 +66,8 @@ class SegmentationDataset(Dataset):
                 labeled_mask, num_features = scipy.ndimage.label(mask)
                 for j in range(1, num_features + 1):
                     component_mask = (labeled_mask == j)
-                    masks.append(torch.as_tensor(component_mask, dtype=torch.uint8))
+                    masks.append(torch.as_tensor(component_mask,
+                                                 dtype=torch.uint8))
                     labels.append(i)
 
         boxes = []
@@ -78,15 +83,16 @@ class SegmentationDataset(Dataset):
                 ymin = torch.min(pos[:, 0])
                 ymax = torch.max(pos[:, 0])
                 if xmin < xmax and ymin < ymax:
-                    boxes.append(torch.tensor([xmin, ymin, xmax, ymax], dtype=torch.float32))
+                    boxes.append(torch.tensor([xmin, ymin, xmax, ymax],
+                                              dtype=torch.float32))
                     valid_masks.append(mask)
                     valid_labels.append(label)
 
         if len(valid_masks) == 0:
-            valid_masks = [torch.zeros((img.height, img.width), dtype=torch.uint8)]
+            valid_masks = [torch.zeros((img.height, img.width),
+                                       dtype=torch.uint8)]
             valid_labels = [1]
             boxes = [torch.tensor([0, 0, 1, 1], dtype=torch.float32)]
-            print(f"Warning: No valid masks found for {image_path}, using dummy mask")
 
         masks = torch.stack(valid_masks)
         labels = valid_labels
@@ -108,6 +114,7 @@ class SegmentationDataset(Dataset):
 
     def __len__(self):
         return len(self.folders)
+
 
 class ConvNeXtBackbone(torch.nn.Module):
     def __init__(self):
@@ -138,6 +145,7 @@ class ConvNeXtBackbone(torch.nn.Module):
             'feature7': out7
         }
 
+
 class MaskRCNNModel(torch.nn.Module):
     def __init__(self, num_classes=5, pretrained=True):
         super(MaskRCNNModel, self).__init__()
@@ -154,23 +162,24 @@ class MaskRCNNModel(torch.nn.Module):
             in_channels_list=[128, 256, 512, 1024],
             out_channels=256
         )
-        
+
         # Initialize Mask R-CNN with the custom backbone
         self.model = MaskRCNN(
             backbone_with_fpn,
             num_classes=num_classes
         )
-        
+
         # Replace the classification head
         in_features = self.model.roi_heads.box_predictor.cls_score.in_features
-        self.model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(
+        self.model.roi_heads.box_predictor = FastRCNNPredictor(
             in_features, num_classes
         )
-        
+
         # Replace the mask head
-        in_features_mask = self.model.roi_heads.mask_predictor.conv5_mask.in_channels
+        in_features_mask = self.model.roi_heads.\
+            mask_predictor.conv5_mask.in_channels
         hidden_layer = 256
-        self.model.roi_heads.mask_predictor = torchvision.models.detection.mask_rcnn.MaskRCNNPredictor(
+        self.model.roi_heads.mask_predictor = MaskRCNNPredictor(
             in_features_mask, hidden_layer, num_classes
         )
         self.model.roi_heads.detections_per_img = DETECTIONS_PER_IMG
@@ -181,8 +190,10 @@ class MaskRCNNModel(torch.nn.Module):
         else:
             return self.model(images)
 
+
 def collate_fn(batch):
     return tuple(zip(*batch))
+
 
 def train(model, optimizer, data_loader, device, scaler):
     model.train()
@@ -207,6 +218,7 @@ def train(model, optimizer, data_loader, device, scaler):
 
     return running_loss / len(data_loader)
 
+
 def create_coco_gt(dataset, device):
     coco_gt = {
         "images": [],
@@ -230,7 +242,8 @@ def create_coco_gt(dataset, device):
         areas = target['area'].cpu().numpy()
         iscrowd = target['iscrowd'].cpu().numpy()
 
-        for box, label, mask, area, crowd in zip(boxes, labels, masks, areas, iscrowd):
+        for box, label, mask, area, crowd in zip(boxes, labels,
+                                                 masks, areas, iscrowd):
             if label == 0:
                 continue
             x, y, x2, y2 = box
@@ -249,8 +262,8 @@ def create_coco_gt(dataset, device):
                 "iscrowd": int(crowd)
             })
             ann_id += 1
-
     return coco_gt
+
 
 def create_coco_dt(outputs, image_ids, device):
     coco_dt = []
@@ -280,8 +293,8 @@ def create_coco_dt(outputs, image_ids, device):
                 "segmentation": rle
             })
             ann_id += 1
-
     return coco_dt
+
 
 def validate(model, data_loader, device):
     model.eval()
@@ -293,12 +306,20 @@ def validate(model, data_loader, device):
     coco_dt = []
     image_ids = []
     with torch.no_grad():
-        for images, targets in tqdm(data_loader, desc="Validating", leave=False):
+        for images, targets in tqdm(data_loader,
+                                    desc="Validating", leave=False):
             images = list(img.to(device) for img in images)
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+            targets = [{k: v.to(device) for k, v in t.items()}
+                       for t in targets]
             outputs = model(images)
             image_ids.extend([t['image_id'].item() for t in targets])
-            coco_dt.extend(create_coco_dt(outputs, [t['image_id'].item() for t in targets], device))
+            coco_dt.extend(
+                create_coco_dt(
+                    outputs,
+                    [t['image_id'].item() for t in targets],
+                    device
+                )
+            )
 
     if not coco_dt:
         return 0.0
@@ -313,20 +334,27 @@ def validate(model, data_loader, device):
     mAP = coco_eval.stats[0] if coco_eval.stats[0] >= 0 else 0.0
     return float(mAP)
 
+
 def main(seed=77):
     set_seed(seed)
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    device = torch.device('cuda')
 
     root = 'data/train'
     all_folders = [os.path.join(root, d) for d in os.listdir(root)]
 
-    train_folders, valid_folders = train_test_split(all_folders, test_size=0.2, random_state=seed)
+    train_folders, valid_folders = train_test_split(all_folders,
+                                                    test_size=0.2,
+                                                    random_state=seed)
 
-    train_dataset = SegmentationDataset(train_folders, transforms=train_transform)
-    valid_dataset = SegmentationDataset(valid_folders, transforms=valid_transform)
+    train_dataset = SegmentationDataset(train_folders,
+                                        transforms=train_transform)
+    valid_dataset = SegmentationDataset(valid_folders,
+                                        transforms=valid_transform)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
-    valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE,
+                              shuffle=True, collate_fn=collate_fn)
+    valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE,
+                              shuffle=False, collate_fn=collate_fn)
 
     model = MaskRCNNModel(num_classes=5, pretrained=True).to(device)
     scaler = torch.amp.GradScaler()
@@ -344,7 +372,7 @@ def main(seed=77):
 
         train_losses.append(train_loss)
         valid_maps.append(valid_map)
-        
+
         print(f"Epoch {epoch + 1}/{EPOCHS}")
         print(f"Train Loss: {train_loss:.4f}")
         print(f"Validation mAP: {valid_map:.4f}")
@@ -361,6 +389,7 @@ def main(seed=77):
             break
     print(f"train_losses: {train_losses}")
     print(f"mAP: {valid_maps}")
+
 
 if __name__ == "__main__":
     main(seed=77)
